@@ -1,277 +1,98 @@
-// Import necessary modules from the MCP SDK
+#!/usr/bin/env node
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-// Import zod for schema validation and type safety
 import { z } from "zod";
+import { Readability } from '@mozilla/readability';
+import { JSDOM } from 'jsdom';
+import { htmlToMarkdown } from './data_processing.js';
 
-// Define constants for the National Weather Service API
-const NWS_API_BASE = "https://api.weather.gov"; // Base URL for the NWS API
-const USER_AGENT = "weather-app/1.0"; // User-Agent header value for API requests
+/**
+ * Scrapes a website and converts the HTML content to markdown
+ * @param url The URL to scrape
+ * @returns The markdown content as a string
+ */
+export async function scrapeToMarkdown(url: string): Promise<string> {
+  try {
+    // Fetch the HTML content from the provided URL with proper headers
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch URL: ${response.status}`);
+    }
+    
+    // Get content type to check encoding
+    const contentType = response.headers.get('content-type') || '';
+    const htmlContent = await response.text();
 
-// Create an MCP server instance with a name and version
-// This is the main entry point for our MCP implementation
+    // Parse the HTML using JSDOM with the URL to resolve relative links
+    const dom = new JSDOM(htmlContent, { 
+      url,
+      pretendToBeVisual: true, // This helps with some interactive content
+    });
+    
+    // Extract the main content using Readability
+    const reader = new Readability(dom.window.document);
+    const article = reader.parse();
+    
+    if (!article || !article.content) {
+      throw new Error("Failed to parse article content");
+    }
+    
+    // Convert the cleaned article HTML to Markdown using htmlToMarkdown
+    let markdown = htmlToMarkdown(article.content);
+    
+    // Simple post-processing to improve code blocks with language hints
+    markdown = markdown.replace(/```\n(class|function|import|const|let|var|if|for|while)/g, '```javascript\n$1');
+    markdown = markdown.replace(/```\n(def|class|import|from|with|if|for|while)(\s+)/g, '```python\n$1$2');
+    
+    return markdown;
+  } catch (error: any) {
+    throw new Error(`Scraping error: ${error.message}`);
+  }
+}
+
+
+
+
+// Create an MCP server instance
 const server = new McpServer({
-  name: "weather", // Server identifier in the MCP ecosystem
-  version: "1.0.0" // Semantic versioning for our server
+  name: "ScrapeServer",
+  version: "1.0.0"
 });
 
-/**
- * Helper function to make requests to the National Weather Service API
- *
- * @param url - The full URL endpoint to request data from
- * @returns A Promise that resolves to the parsed JSON response, or null if the request fails
- * @template T - Type parameter for the expected response data structure
- */
-async function makeNWSRequest<T>(url: string): Promise<T | null> {
-  // Create headers for the API request
-  // NWS API requires a User-Agent header and prefers geo+json format
-  const headers = {
-    "User-Agent": USER_AGENT,
-    Accept: "application/geo+json"
-  };
-
-  try {
-    // Make the HTTP request with fetch API
-    const response = await fetch(url, { headers });
-
-    // Check if the response was successful (status code 200-299)
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    // Parse the JSON response and cast it to the expected type
-    return (await response.json()) as T;
-  } catch (error) {
-    // Log any errors that occur during the request
-    console.error("Error making NWS request:", error);
-    return null; // Return null to indicate a failed request
-  }
-}
-
-/**
- * Interface defining the structure of a weather alert feature
- * This matches the expected JSON structure from the NWS alerts endpoint
- */
-interface AlertFeature {
-  properties: {
-    event?: string; // Type of weather event (e.g., "Flood Warning")
-    areaDesc?: string; // Geographic area affected by the alert
-    severity?: string; // Severity level (e.g., "Moderate", "Severe")
-    status?: string; // Current status of the alert
-    headline?: string; // Brief headline describing the alert
-  };
-}
-
-/**
- * Utility function to format weather alert data into a human-readable string
- *
- * @param feature - An AlertFeature object containing alert information
- * @returns A formatted string with alert details
- */
-function formatAlert(feature: AlertFeature): string {
-  const props = feature.properties;
-  return [
-    `Event: ${props.event || "Unknown"}`,
-    `Area: ${props.areaDesc || "Unknown"}`,
-    `Severity: ${props.severity || "Unknown"}`,
-    `Status: ${props.status || "Unknown"}`,
-    `Headline: ${props.headline || "No headline"}`,
-    "---" // Separator for multiple alerts
-  ].join("\n"); // Join lines with newline characters
-}
-
-/**
- * Interface for a weather forecast period
- * This matches the expected structure from the NWS forecast endpoint
- */
-interface ForecastPeriod {
-  name?: string; // Time period name (e.g., "Tonight", "Wednesday")
-  temperature?: number; // Forecast temperature
-  temperatureUnit?: string; // Temperature unit (F or C)
-  windSpeed?: string; // Wind speed description
-  windDirection?: string; // Wind direction (e.g., "NW")
-  shortForecast?: string; // Brief forecast description
-}
-
-/**
- * Interface for the alerts response from the NWS API
- */
-interface AlertsResponse {
-  features: AlertFeature[]; // Array of alert features
-}
-
-/**
- * Interface for the points response from the NWS API
- * This endpoint provides metadata about a geographic point
- */
-interface PointsResponse {
-  properties: {
-    forecast?: string; // URL to the forecast endpoint for this location
-  };
-}
-
-/**
- * Interface for the forecast response from the NWS API
- */
-interface ForecastResponse {
-  properties: {
-    periods: ForecastPeriod[]; // Array of forecast periods
-  };
-}
-
-// Register a tool for getting weather alerts by state
-// Tools in MCP are functions that can be invoked by clients (like Claude)
+// Register the "scrape-to-markdown" tool
 server.tool(
-  "get-alerts", // Tool name - used by clients to call this tool
-  "Get weather alerts for a state", // Tool description - helps clients understand the purpose
-  {
-    // Define the input schema using zod for validation
-    state: z.string().length(2).describe("Two-letter state code (e.g. CA, NY)")
-  },
-  // Tool implementation function - what happens when this tool is called
-  async ({ state }) => {
-    // Convert state code to uppercase for consistency
-    const stateCode = state.toUpperCase();
-
-    // Construct the API URL for alerts in this state
-    const alertsUrl = `${NWS_API_BASE}/alerts?area=${stateCode}`;
-
-    // Make the API request to get alerts data
-    const alertsData = await makeNWSRequest<AlertsResponse>(alertsUrl);
-
-    // Handle the case where the API request failed
-    if (!alertsData) {
+  "scrape-to-markdown",
+  { url: z.string().url() },
+  async ({ url }) => {
+    try {
+      const markdown = await scrapeToMarkdown(url);
+      
+      // Return the markdown as the tool result
       return {
-        content: [
-          {
-            type: "text",
-            text: "Failed to retrieve alerts data"
-          }
-        ]
+        content: [{ type: "text", text: markdown }]
+      };
+    } catch (error: any) {
+      // Handle errors gracefully
+      return {
+        content: [{ type: "text", text: `Error: ${error.message}` }],
+        isError: true
       };
     }
-
-    // Get the array of alert features, or an empty array if none
-    const features = alertsData.features || [];
-
-    // Handle the case where there are no active alerts
-    if (features.length === 0) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `No active alerts for ${stateCode}`
-          }
-        ]
-      };
-    }
-
-    // Format each alert feature into a readable string
-    const formattedAlerts = features.map(formatAlert);
-
-    // Combine all alerts into a single text response
-    const alertsText = `Active alerts for ${stateCode}:\n\n${formattedAlerts.join("\n")}`;
-
-    // Return the tool result in the format expected by the MCP protocol
-    return {
-      content: [
-        {
-          type: "text", // Content type is text (could also be image, etc.)
-          text: alertsText // The actual response text
-        }
-      ]
-    };
   }
 );
 
-// Register a tool for getting weather forecasts by location coordinates
-server.tool(
-  "get-forecast", // Tool name
-  "Get weather forecast for a location", // Tool description
-  {
-    // Input schema with validation constraints
-    latitude: z.number().min(-90).max(90).describe("Latitude of the location"),
-    longitude: z.number().min(-180).max(180).describe("Longitude of the location")
-  },
-  // Tool implementation function
-  async ({ latitude, longitude }) => {
-    // Step 1: Get grid point data for these coordinates
-    // The NWS API requires first getting the "grid point" for a location
-    const pointsUrl = `${NWS_API_BASE}/points/${latitude.toFixed(4)},${longitude.toFixed(4)}`;
-    const pointsData = await makeNWSRequest<PointsResponse>(pointsUrl);
+// Start the MCP server using stdio transport
+// const transport = new StdioServerTransport();
+// await server.connect(transport);
 
-    // Handle failure to get grid point data
-    if (!pointsData) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Failed to retrieve grid point data for coordinates: ${latitude}, ${longitude}. This location may not be supported by the NWS API (only US locations are supported).`
-          }
-        ]
-      };
-    }
-
-    // Step 2: Extract the forecast URL from the points data
-    const forecastUrl = pointsData.properties?.forecast;
-    if (!forecastUrl) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Failed to get forecast URL from grid point data"
-          }
-        ]
-      };
-    }
-
-    // Step 3: Get the actual forecast data using the URL from step 2
-    const forecastData = await makeNWSRequest<ForecastResponse>(forecastUrl);
-    if (!forecastData) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "Failed to retrieve forecast data"
-          }
-        ]
-      };
-    }
-
-    // Step 4: Extract the forecast periods from the response
-    const periods = forecastData.properties?.periods || [];
-    if (periods.length === 0) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "No forecast periods available"
-          }
-        ]
-      };
-    }
-
-    // Step 5: Format each forecast period into a readable string
-    const formattedForecast = periods.map((period: ForecastPeriod) => [`${period.name || "Unknown"}:`, `Temperature: ${period.temperature || "Unknown"}°${period.temperatureUnit || "F"}`, `Wind: ${period.windSpeed || "Unknown"} ${period.windDirection || ""}`, `${period.shortForecast || "No forecast available"}`, "---"].join("\n"));
-
-    // Step 6: Combine all forecast periods into a single response
-    const forecastText = `Forecast for ${latitude}, ${longitude}:\n\n${formattedForecast.join("\n")}`;
-
-    // Return the formatted forecast
-    return {
-      content: [
-        {
-          type: "text",
-          text: forecastText
-        }
-      ]
-    };
-  }
-);
-
-/**
- * Main function to initialize and connect the MCP server
- */
 async function main() {
   // Create a stdio transport for communication
   // This allows the server to communicate with clients via standard input/output
