@@ -10,12 +10,14 @@
   "bin": {
     "scrape": "./build/cli.js"
   },
+  "preferGlobal": true,
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('build/cli.js', '755')\"",
+    "build": "tsc && chmod +x build/cli.js",
     "start": "npm run build && node build/index.js",
     "start:cli": "npm run build && node build/cli.js",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
-    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch"
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
+    "postinstall": "npm run build"
   },
   "files": [
     "build"
